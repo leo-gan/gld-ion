@@ -1,0 +1,30 @@
+# Local notes and scratch. Never commit.
+temp/
+
+# Secrets. Never commit.
+.env
+.env.*
+!.env.example
+
+# Pixi
+.pixi/
+
+# Python
+__pycache__/
+*.py[cod]
+
+# Mojo
+.mojo_cache/
+*.mojoc
+
+# MkDocs
+site/
+
+# rattler-build
+output/
+
+# Editors / OS
+.idea/
+.vscode/
+*.swp
+.DS_Store
