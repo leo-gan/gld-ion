@@ -1,7 +1,8 @@
-from std.collections import List
+from std.collections import List, Span
 
 from runtime.error import DecodeError
-from runtime.intx import BigInt, big_from_u64
+from runtime.intx import BigInt
+from runtime.utf8 import validate_utf8
 
 
 comptime K_NULL = 1
@@ -120,6 +121,7 @@ struct IonDoc(Movable):
     var blob_len: List[Int]
     var blob_bytes: List[Byte]
     var top: List[Int]
+    var sym_at: List[Int]
 
     def __init__(out self):
         self.nodes = List[IonNode]()
@@ -134,6 +136,18 @@ struct IonDoc(Movable):
         self.blob_len = List[Int]()
         self.blob_bytes = List[Byte]()
         self.top = List[Int]()
+        self.sym_at = List[Int]()
+
+    def reserve(mut self, n: Int):
+        var count = n
+        if count < 8:
+            count = 8
+        self.nodes.reserve(count)
+        self.edges.reserve(count)
+        self.limbs.reserve(count)
+        self.top.reserve(count)
+        self.texts.reserve(16)
+        self.syms.reserve(16)
 
     def intern(mut self, text: String) -> Int:
         var i = 0
@@ -142,6 +156,7 @@ struct IonDoc(Movable):
                 return i
             i += 1
         self.texts.append(text)
+        self.sym_at.append(-1)
         return len(self.texts) - 1
 
     def _add(mut self, node: IonNode) -> Int:
@@ -172,12 +187,26 @@ struct IonDoc(Movable):
         return self._add(n)
 
     def add_i64(mut self, value: Int64) -> Int:
+        """Store `value` as one or two little-endian limbs. Zero keeps an empty limb list."""
+        var n = IonNode(K_INT)
+        if value == Int64(0):
+            return self._add(n)
+        var mag = UInt64(value)
         if value < Int64(0):
-            var mag = UInt64(0) - UInt64(value)
+            n.c = 1
             if value == Int64(-9223372036854775807) - Int64(1):
                 mag = UInt64(0x8000000000000000)
-            return self.add_int(big_from_u64(mag, True))
-        return self.add_int(big_from_u64(UInt64(value), False))
+            else:
+                mag = UInt64(0) - UInt64(value)
+        n.a = len(self.limbs)
+        var lo = UInt32(mag & UInt64(0xFFFFFFFF))
+        var hi = UInt32(mag >> UInt64(32))
+        self.limbs.append(lo)
+        n.b = 1
+        if hi != UInt32(0):
+            self.limbs.append(hi)
+            n.b = 2
+        return self._add(n)
 
     def add_float(mut self, width: Int, bits: UInt64) -> Int:
         var n = IonNode(K_FLOAT)
@@ -210,13 +239,54 @@ struct IonDoc(Movable):
         n.a = self.intern(text)
         return self._add(n)
 
+    def add_string_at(mut self, text_i: Int) -> Int:
+        var n = IonNode(K_STRING)
+        n.a = text_i
+        return self._add(n)
+
+    def add_string_raw[origin: ImmOrigin](mut self, span: Span[Byte, origin], offset: Int) raises DecodeError -> Int:
+        """Intern `span` and add a string node. ASCII skips the UTF-8 checker. A repeat reuses the text."""
+        var n = len(span)
+        var k = 0
+        while k < n:
+            if Int(span[k]) >= 128:
+                validate_utf8(span, offset)
+                break
+            k += 1
+        var i = 0
+        while i < len(self.texts):
+            var b = self.texts[i].as_bytes()
+            if len(b) == n:
+                var same = True
+                var j = 0
+                while j < n:
+                    if Int(b[j]) != Int(span[j]):
+                        same = False
+                        break
+                    j += 1
+                if same:
+                    return self.add_string_at(i)
+            i += 1
+        self.texts.append(String(unsafe_from_utf8=span))
+        self.sym_at.append(-1)
+        return self.add_string_at(len(self.texts) - 1)
+
     def add_symbol_text(mut self, text: String) -> Int:
-        """A symbol whose text is known, including the empty symbol `''`."""
+        """A symbol whose text is known, including the empty symbol `''`.
+
+        Repeated text reuses one symbol node. Callers that only need the text can share it.
+        """
+        var ti = self.intern(text)
+        var cached = self.sym_at[ti]
+        if cached >= 0:
+            return cached
         var n = IonNode(K_SYMBOL)
-        var s = SymRef(self.intern(text), 0, -1, 0)
+        var s = SymRef(ti, 0, -1, 0)
         n.a = len(self.syms)
         self.syms.append(s)
-        return self._add(n)
+        var id = self._add(n)
+        self.sym_at[ti] = id
+        return id
 
     def wrap_sym(mut self, sym: Int) -> Int:
         var n = IonNode(K_SYMBOL)

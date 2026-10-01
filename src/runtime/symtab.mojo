@@ -6,6 +6,56 @@ from runtime.error import DecodeError
 comptime SYS_MAX = 9
 
 
+def sys_name(sid: Int) -> String:
+    if sid == 1:
+        return "$ion"
+    if sid == 2:
+        return "$ion_1_0"
+    if sid == 3:
+        return "$ion_symbol_table"
+    if sid == 4:
+        return "name"
+    if sid == 5:
+        return "version"
+    if sid == 6:
+        return "imports"
+    if sid == 7:
+        return "symbols"
+    if sid == 8:
+        return "max_id"
+    if sid == 9:
+        return "$ion_shared_symbol_table"
+    return String()
+
+
+def sys_sid(text: String) -> Int:
+    var raw = text.as_bytes()
+    var n = len(raw)
+    if n == 0:
+        return 0
+    if n == 4 and Int(raw[0]) == 110 and Int(raw[1]) == 97 and Int(raw[2]) == 109 and Int(raw[3]) == 101:
+        return 4
+    if Int(raw[0]) != 36 and n != 7 and n != 6 and n != 8 and n != 25:
+        return 0
+    if text == "$ion":
+        return 1
+    if text == "$ion_1_0":
+        return 2
+    if text == "$ion_symbol_table":
+        return 3
+    if text == "version":
+        return 5
+    if text == "imports":
+        return 6
+    if text == "symbols":
+        return 7
+    if text == "max_id":
+        return 8
+    if text == "$ion_shared_symbol_table":
+        return 9
+    return 0
+
+
 struct SharedTable(Movable):
     """One version of a shared symbol table. `texts[0]` is symbol id 1. `gap[i]` is true when that id has no text."""
 
@@ -98,42 +148,26 @@ struct LocalTab(Movable):
         self.known = List[Bool]()
         self.names = List[String]()
         self.segs = List[TabSeg]()
-        self.max_id = 0
+        self.max_id = SYS_MAX
         self.text.append(String())
         self.known.append(False)
-        var names = List[String]()
-        names.append(String("$ion"))
-        names.append(String("$ion_1_0"))
-        names.append(String("$ion_symbol_table"))
-        names.append(String("name"))
-        names.append(String("version"))
-        names.append(String("imports"))
-        names.append(String("symbols"))
-        names.append(String("max_id"))
-        names.append(String("$ion_shared_symbol_table"))
-        var i = 0
-        while i < len(names):
-            self.text.append(names[i])
-            self.known.append(True)
-            i += 1
         var seg = TabSeg()
         seg.start = 1
         seg.count = SYS_MAX
         seg.flat_at = 1
-        seg.flat_n = SYS_MAX
+        seg.flat_n = 0
         self.segs.append(seg)
-        self.max_id = SYS_MAX
 
     def reset_system(mut self):
         while len(self.segs) > 1:
             _ = self.segs.pop()
-        while len(self.text) > SYS_MAX + 1:
+        while len(self.text) > 1:
             _ = self.text.pop()
             _ = self.known.pop()
         self.max_id = SYS_MAX
         var seg = self.segs[0]
         seg.count = SYS_MAX
-        seg.flat_n = SYS_MAX
+        seg.flat_n = 0
         self.segs[0] = seg
 
     def _add_flat(mut self, var text: String, is_known: Bool) -> Int:
@@ -165,6 +199,9 @@ struct LocalTab(Movable):
         return self._add_flat(String(), False)
 
     def sid_of(self, text: String) -> Int:
+        var sys = sys_sid(text)
+        if sys != 0:
+            return sys
         var s = 0
         while s < len(self.segs):
             var seg = self.segs[s]
@@ -183,6 +220,10 @@ struct LocalTab(Movable):
         if sid < 0 or sid > self.max_id:
             raise DecodeError(DecodeError.KIND_SYMBOL, offset)
         if sid == 0:
+            return out^
+        if sid <= SYS_MAX:
+            out.known = True
+            out.text = sys_name(sid)
             return out^
         var s = 0
         while s < len(self.segs):

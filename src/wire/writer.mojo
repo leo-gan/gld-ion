@@ -69,9 +69,47 @@ def _ident_ok(text: String) -> Bool:
         if not ok:
             return False
         i += 1
-    if text == "null" or text == "true" or text == "false" or text == "nan":
-        return False
+    var n = len(b)
+    if n != 3 and n != 4 and n != 5:
+        return True
+    if n == 4 and c0 == 110:
+        return not (Int(b[1]) == 117 and Int(b[2]) == 108 and Int(b[3]) == 108)
+    if n == 4 and c0 == 116:
+        return not (Int(b[1]) == 114 and Int(b[2]) == 117 and Int(b[3]) == 101)
+    if n == 3 and c0 == 110:
+        return not (Int(b[1]) == 97 and Int(b[2]) == 110)
+    if n == 5 and c0 == 102:
+        return not (
+            Int(b[1]) == 97 and Int(b[2]) == 108 and Int(b[3]) == 115 and Int(b[4]) == 101
+        )
     return True
+
+
+def _put_dec(mut buf: List[Byte], neg: Bool, mag: Int):
+    if neg:
+        buf.append(Byte(45))
+    if mag < 10:
+        buf.append(Byte(48 + mag))
+        return
+    if mag < 100:
+        buf.append(Byte(48 + mag // 10))
+        buf.append(Byte(48 + mag % 10))
+        return
+    if mag < 1000:
+        buf.append(Byte(48 + mag // 100))
+        var r = mag % 100
+        buf.append(Byte(48 + r // 10))
+        buf.append(Byte(48 + r % 10))
+        return
+    var tmp = List[Byte]()
+    var v = mag
+    while v > 0:
+        tmp.append(Byte(48 + (v % 10)))
+        v = v // 10
+    var i = len(tmp) - 1
+    while i >= 0:
+        buf.append(tmp[i])
+        i -= 1
 
 
 def _pad(mut buf: List[Byte], n: Int, width: Int):
@@ -100,10 +138,10 @@ def _varuint(mut buf: List[Byte], value: Int):
     var v = value
     if v < 0:
         v = 0
-    var parts = List[Int]()
-    if v == 0:
-        buf.append(Byte(0x80))
+    if v < 128:
+        buf.append(Byte(0x80 | v))
         return
+    var parts = List[Int]()
     var x = v
     while x > 0:
         parts.append(x & 0x7F)
@@ -167,7 +205,13 @@ struct SymMap:
         self.sids = List[Int]()
 
     def sid(mut self, text: String) -> Int:
-        var sys = _sys(text)
+        var raw = text.as_bytes()
+        var n = len(raw)
+        if n == 4 and Int(raw[0]) == 110 and Int(raw[1]) == 97 and Int(raw[2]) == 109 and Int(raw[3]) == 101:
+            return 4
+        var sys = 0
+        if n > 0 and (Int(raw[0]) == 36 or n == 7 or n == 6 or n == 8 or n == 25):
+            sys = _sys(text)
         if sys != 0:
             return sys
         var i = 0
@@ -348,6 +392,12 @@ def _write_text(doc: IonDoc, id: Int, mut buf: List[Byte], options: EncodeOption
             i += 1
         return
     if k == K_INT:
+        if n.b <= 1:
+            var mag = 0
+            if n.b == 1:
+                mag = Int(doc.limbs[n.a])
+            _put_dec(buf, n.c != 0 and mag != 0, mag)
+            return
         var mag = _limbs(doc, n.a, n.b)
         if n.c != 0:
             mag.neg = True
@@ -387,38 +437,67 @@ def _write_text(doc: IonDoc, id: Int, mut buf: List[Byte], options: EncodeOption
             open = 40
             close = 41
         buf.append(Byte(open))
+        var edge = n.child
         var i = 0
         while i < n.nchild:
-            if i > 0 and not options.pretty:
-                buf.append(Byte(44))
-            _nl(buf, options, depth + 1)
-            _write_text(doc, doc.child_at(id, i), buf, options, depth + 1)
+            if i > 0:
+                if k == K_LIST:
+                    buf.append(Byte(44))
+                elif not options.pretty:
+                    buf.append(Byte(32))
+            if options.pretty:
+                _nl(buf, options, depth + 1)
+            _write_text(doc, doc.edges[edge].child, buf, options, depth + 1)
+            edge = doc.edges[edge].next
             i += 1
-        if n.nchild > 0:
+        if n.nchild > 0 and options.pretty:
             _nl(buf, options, depth)
         buf.append(Byte(close))
         return
     if k == K_STRUCT:
         buf.append(Byte(123))
+        var edge = n.child
         var i = 0
         while i < n.nchild:
-            if i > 0 and not options.pretty:
+            if i > 0:
                 buf.append(Byte(44))
-            _nl(buf, options, depth + 1)
-            var f = doc.syms[doc.field_at(id, i)]
+            if options.pretty:
+                _nl(buf, options, depth + 1)
+            var f = doc.syms[doc.edges[edge].field]
             if f.text < 0:
                 buf.append(Byte(36))
                 buf.append(Byte(48))
             else:
                 _sym_text(buf, doc.texts[f.text])
             buf.append(Byte(58))
-            _write_text(doc, doc.child_at(id, i), buf, options, depth + 1)
+            _write_text(doc, doc.edges[edge].child, buf, options, depth + 1)
+            edge = doc.edges[edge].next
             i += 1
-        if n.nchild > 0:
+        if n.nchild > 0 and options.pretty:
             _nl(buf, options, depth)
         buf.append(Byte(125))
         return
     raise DecodeError(DecodeError.KIND_TYPE, 0)
+
+
+def _f16_text(h: UInt16) -> Float64:
+    var sign = UInt64(h & UInt16(0x8000)) << UInt64(48)
+    var exp = Int((h & UInt16(0x7C00)) >> UInt16(10))
+    var frac = UInt64(h & UInt16(0x03FF))
+    if exp == 0:
+        if frac == UInt64(0):
+            return Float64(from_bits=sign)
+        exp = 1
+        while (frac & UInt64(0x0400)) == UInt64(0):
+            frac = frac << UInt64(1)
+            exp -= 1
+        frac = frac & UInt64(0x03FF)
+    if exp == 31:
+        var bits = sign | (UInt64(0x7FF) << UInt64(52)) | (frac << UInt64(42))
+        return Float64(from_bits=bits)
+    var e = UInt64(exp + (1023 - 15))
+    var bits = sign | (e << UInt64(52)) | (frac << UInt64(42))
+    return Float64(from_bits=bits)
 
 
 def _float_text(doc: IonDoc, id: Int, mut buf: List[Byte]):
@@ -429,13 +508,11 @@ def _float_text(doc: IonDoc, id: Int, mut buf: List[Byte]):
         buf.append(Byte(101))
         buf.append(Byte(48))
         return
-    var f = Float64(0)
+    var f = Float64(from_bits=bits)
     if n.a == 4:
         f = Float64(Float32(from_bits=UInt32(bits)))
     elif n.a == 2:
-        f = Float64(0)
-    else:
-        f = Float64(from_bits=bits)
+        f = _f16_text(UInt16(bits))
     if f != f:
         buf.append(Byte(110))
         buf.append(Byte(97))
@@ -444,6 +521,8 @@ def _float_text(doc: IonDoc, id: Int, mut buf: List[Byte]):
     var sign = (bits & (UInt64(1) << UInt64(63))) != UInt64(0)
     if n.a == 4:
         sign = (UInt32(bits) & UInt32(0x80000000)) != UInt32(0)
+    if n.a == 2:
+        sign = (UInt16(bits) & UInt16(0x8000)) != UInt16(0)
     if f == Float64(0) and sign:
         buf.append(Byte(45))
         buf.append(Byte(48))
@@ -637,22 +716,24 @@ def _lob_text(doc: IonDoc, id: Int, mut buf: List[Byte]):
     _ = append_utf8
 
 
+def _append_ivm(mut buf: List[Byte], version: Int):
+    buf.append(Byte(36))
+    buf.append(Byte(105))
+    buf.append(Byte(111))
+    buf.append(Byte(110))
+    buf.append(Byte(95))
+    buf.append(Byte(49))
+    buf.append(Byte(95))
+    if version == 11:
+        buf.append(Byte(49))
+    else:
+        buf.append(Byte(48))
+
+
 def encode_text(doc: IonDoc, options: EncodeOptions) raises DecodeError -> String:
     var buf = List[Byte]()
-    if options.version == 11:
-        var ivm = String("$ion_1_1")
-        var b = ivm.as_bytes()
-        var i = 0
-        while i < len(b):
-            buf.append(b[i])
-            i += 1
-    else:
-        var ivm = String("$ion_1_0")
-        var b = ivm.as_bytes()
-        var i = 0
-        while i < len(b):
-            buf.append(b[i])
-            i += 1
+    buf.reserve(64 + len(doc.top) * 48)
+    _append_ivm(buf, options.version)
     var t = 0
     while t < len(doc.top):
         buf.append(Byte(10))
@@ -666,28 +747,90 @@ def _be_mag(mag: BigInt) -> List[Byte]:
     return mag.to_be_bytes()
 
 
+def _put_u32_int(neg: Bool, mag: Int, mut buf: List[Byte]):
+    var t = 2
+    if neg and mag != 0:
+        t = 3
+    if mag == 0:
+        buf.append(Byte(t << 4))
+        return
+    if mag < 256:
+        buf.append(Byte((t << 4) | 1))
+        buf.append(Byte(mag))
+        return
+    if mag < 65536:
+        buf.append(Byte((t << 4) | 2))
+        buf.append(Byte((mag >> 8) & 255))
+        buf.append(Byte(mag & 255))
+        return
+    if mag < 16777216:
+        buf.append(Byte((t << 4) | 3))
+        buf.append(Byte((mag >> 16) & 255))
+        buf.append(Byte((mag >> 8) & 255))
+        buf.append(Byte(mag & 255))
+        return
+    buf.append(Byte((t << 4) | 4))
+    buf.append(Byte((mag >> 24) & 255))
+    buf.append(Byte((mag >> 16) & 255))
+    buf.append(Byte((mag >> 8) & 255))
+    buf.append(Byte(mag & 255))
+
+
+def _seal(mut buf: List[Byte], mark: Int, tcode: Int):
+    """Patch a one-byte type descriptor, or insert a VarUInt length when the body is long."""
+    var ln = len(buf) - (mark + 1)
+    if ln < 14:
+        buf[mark] = Byte((tcode << 4) | ln)
+        return
+    var tail = List[Byte]()
+    var i = mark + 1
+    while i < len(buf):
+        tail.append(buf[i])
+        i += 1
+    while len(buf) > mark:
+        _ = buf.pop()
+    buf.append(Byte((tcode << 4) | 14))
+    _varuint(buf, ln)
+    i = 0
+    while i < len(tail):
+        buf.append(tail[i])
+        i += 1
+
+
 def _bin_value(doc: IonDoc, id: Int, mut sm: SymMap, mut buf: List[Byte]) raises DecodeError:
-    var body = List[Byte]()
     var n = doc.nodes[id]
-    var ann_body = List[Byte]()
-    if n.ann_n > 0:
-        var annots = List[Byte]()
-        var a = 0
-        while a < n.ann_n:
-            var s = doc.syms[doc.anns[n.ann + a]]
-            var sid = 0
-            if s.text >= 0:
-                sid = sm.sid(doc.texts[s.text])
-            _varuint(annots, sid)
-            a += 1
-        _varuint(ann_body, len(annots))
-        var i = 0
-        while i < len(annots):
-            ann_body.append(annots[i])
-            i += 1
+    if n.ann_n == 0:
+        _emit_core(doc, id, sm, buf)
+        return
+    var bare = List[Byte]()
+    _emit_core(doc, id, sm, bare)
+    var ann = List[Byte]()
+    var a = 0
+    while a < n.ann_n:
+        var s = doc.syms[doc.anns[n.ann + a]]
+        var sid = 0
+        if s.text >= 0:
+            sid = sm.sid(doc.texts[s.text])
+        _varuint(ann, sid)
+        a += 1
+    var wrapped = List[Byte]()
+    _varuint(wrapped, len(ann))
+    var i = 0
+    while i < len(ann):
+        wrapped.append(ann[i])
+        i += 1
+    i = 0
+    while i < len(bare):
+        wrapped.append(bare[i])
+        i += 1
+    _td(buf, 14, wrapped)
+
+
+def _emit_core(doc: IonDoc, id: Int, mut sm: SymMap, mut buf: List[Byte]) raises DecodeError:
+    var n = doc.nodes[id]
     var k = n.kind
     if k == K_NULL and n.a == 0:
-        body.append(Byte(0x0F))
+        buf.append(Byte(0x0F))
     elif k == K_NULL:
         var code = 0
         if n.a == K_BOOL:
@@ -714,22 +857,25 @@ def _bin_value(doc: IonDoc, id: Int, mut sm: SymMap, mut buf: List[Byte]) raises
             code = 0xCF
         elif n.a == K_STRUCT:
             code = 0xDF
-        body.append(Byte(code))
+        buf.append(Byte(code))
     elif k == K_BOOL:
         if n.a == 0:
-            body.append(Byte(0x10))
+            buf.append(Byte(0x10))
         else:
-            body.append(Byte(0x11))
+            buf.append(Byte(0x11))
     elif k == K_INT:
-        var mag = _limbs(doc, n.a, n.b)
-        var raw = _be_mag(mag)
-        var t = 2
-        if n.c != 0:
-            t = 3
-        _td(body, t, raw)
+        if n.b <= 1:
+            _put_u32_int(n.c != 0, 0 if n.b == 0 else Int(doc.limbs[n.a]), buf)
+        else:
+            var mag = _limbs(doc, n.a, n.b)
+            var raw = _be_mag(mag)
+            var t = 2
+            if n.c != 0:
+                t = 3
+            _td(buf, t, raw)
     elif k == K_FLOAT:
         if n.a == 0:
-            body.append(Byte(0x40))
+            buf.append(Byte(0x40))
         else:
             var bits = doc.floats[n.b]
             var width = n.a
@@ -738,7 +884,7 @@ def _bin_value(doc: IonDoc, id: Int, mut sm: SymMap, mut buf: List[Byte]) raises
             while s >= 0:
                 tmp.append(Byte(Int((bits >> UInt64(s * 8)) & UInt64(255))))
                 s -= 1
-            _td(body, 4, tmp)
+            _td(buf, 4, tmp)
     elif k == K_DECIMAL:
         var tmp = List[Byte]()
         _varint(tmp, n.d, False)
@@ -754,17 +900,22 @@ def _bin_value(doc: IonDoc, id: Int, mut sm: SymMap, mut buf: List[Byte]) raises
             while i < len(be):
                 tmp.append(be[i])
                 i += 1
-        _td(body, 5, tmp)
+        _td(buf, 5, tmp)
     elif k == K_STRING or k == K_BLOB or k == K_CLOB:
-        var tmp = List[Byte]()
         if k == K_STRING:
             var b = doc.texts[n.a].as_bytes()
+            var ln = len(b)
+            if ln < 14:
+                buf.append(Byte((8 << 4) | ln))
+            else:
+                buf.append(Byte((8 << 4) | 14))
+                _varuint(buf, ln)
             var i = 0
-            while i < len(b):
-                tmp.append(b[i])
+            while i < ln:
+                buf.append(b[i])
                 i += 1
-            _td(body, 8, tmp)
         else:
+            var tmp = List[Byte]()
             var i = 0
             var start = doc.blob_at[n.a]
             while i < doc.blob_len[n.a]:
@@ -773,14 +924,14 @@ def _bin_value(doc: IonDoc, id: Int, mut sm: SymMap, mut buf: List[Byte]) raises
             var tcode = 10
             if k == K_CLOB:
                 tcode = 9
-            _td(body, tcode, tmp)
+            _td(buf, tcode, tmp)
     elif k == K_SYMBOL:
         var sid = 0
         var s = doc.syms[n.a]
         if s.text >= 0:
             sid = sm.sid(doc.texts[s.text])
         if sid == 0:
-            body.append(Byte(0x70))
+            buf.append(Byte(0x70))
         else:
             var raw = BigInt()
             var tmp = List[Byte]()
@@ -795,46 +946,33 @@ def _bin_value(doc: IonDoc, id: Int, mut sm: SymMap, mut buf: List[Byte]) raises
             while i >= 0:
                 be.append(tmp[i])
                 i -= 1
-            _td(body, 7, be)
+            _td(buf, 7, be)
             _ = raw
     elif k == K_TIMESTAMP:
-        _bin_time(doc, id, body)
+        _bin_time(doc, id, buf)
     elif k == K_LIST or k == K_SEXP or k == K_STRUCT:
-        var tmp = List[Byte]()
-        var i = 0
-        while i < n.nchild:
-            if k == K_STRUCT:
-                var f = doc.syms[doc.field_at(id, i)]
-                var sid = 0
-                if f.text >= 0:
-                    sid = sm.sid(doc.texts[f.text])
-                _varuint(tmp, sid)
-            _bin_value(doc, doc.child_at(id, i), sm, tmp)
-            i += 1
         var tcode = 11
         if k == K_SEXP:
             tcode = 12
         if k == K_STRUCT:
             tcode = 13
-        _td(body, tcode, tmp)
+        var mark = len(buf)
+        buf.append(Byte(0))
+        var edge = n.child
+        var i = 0
+        while i < n.nchild:
+            if k == K_STRUCT:
+                var f = doc.syms[doc.edges[edge].field]
+                var sid = 0
+                if f.text >= 0:
+                    sid = sm.sid(doc.texts[f.text])
+                _varuint(buf, sid)
+            _bin_value(doc, doc.edges[edge].child, sm, buf)
+            edge = doc.edges[edge].next
+            i += 1
+        _seal(buf, mark, tcode)
     else:
         raise DecodeError(DecodeError.KIND_TYPE, 0)
-    if n.ann_n > 0:
-        var wrapped = List[Byte]()
-        var i = 0
-        while i < len(ann_body):
-            wrapped.append(ann_body[i])
-            i += 1
-        i = 0
-        while i < len(body):
-            wrapped.append(body[i])
-            i += 1
-        _td(buf, 14, wrapped)
-    else:
-        var i = 0
-        while i < len(body):
-            buf.append(body[i])
-            i += 1
 
 
 def _bin_time(doc: IonDoc, id: Int, mut buf: List[Byte]) raises DecodeError:
@@ -889,8 +1027,41 @@ def _bin_time(doc: IonDoc, id: Int, mut buf: List[Byte]) raises DecodeError:
     _td(buf, 6, tmp)
 
 
+def _write_simple_lst(sm: SymMap, mut buf: List[Byte]):
+    """Ion 1.0 local symbol table with only a `symbols` list. No imports."""
+    var mark = len(buf)
+    buf.append(Byte(0))
+    _varuint(buf, 1)
+    _varuint(buf, 3)
+    var smark = len(buf)
+    buf.append(Byte(0))
+    _varuint(buf, 7)
+    var lmark = len(buf)
+    buf.append(Byte(0))
+    var i = 0
+    while i < len(sm.texts):
+        var b = sm.texts[i].as_bytes()
+        var ln = len(b)
+        if ln < 14:
+            buf.append(Byte((8 << 4) | ln))
+        else:
+            buf.append(Byte((8 << 4) | 14))
+            _varuint(buf, ln)
+        var k = 0
+        while k < ln:
+            buf.append(b[k])
+            k += 1
+        i += 1
+    _seal(buf, lmark, 11)
+    _seal(buf, smark, 13)
+    _seal(buf, mark, 14)
+
+
 def _write_lst(sm: SymMap, options: EncodeOptions, cat: Catalog, mut buf: List[Byte]) raises DecodeError:
     if len(sm.texts) == 0 and len(options.import_names) == 0:
+        return
+    if len(options.import_names) == 0:
+        _write_simple_lst(sm, buf)
         return
     var fields = List[Byte]()
     if len(options.import_names) > 0:
@@ -972,26 +1143,27 @@ def _write_lst(sm: SymMap, options: EncodeOptions, cat: Catalog, mut buf: List[B
 
 
 def encode_binary(doc: IonDoc, options: EncodeOptions, cat: Catalog) raises DecodeError -> List[Byte]:
-    var sm = SymMap()
-    var t = 0
-    while t < len(doc.top):
-        _gather(doc, doc.top[t], sm)
-        t += 1
     var buf = List[Byte]()
     buf.append(Byte(0xE0))
     buf.append(Byte(0x01))
     if options.version == 11:
         buf.append(Byte(0x01))
-    else:
-        buf.append(Byte(0x00))
-    buf.append(Byte(0xEA))
-    if options.version == 11:
+        buf.append(Byte(0xEA))
         encode_values11(doc, buf)
         return buf^
+    buf.append(Byte(0x00))
+    buf.append(Byte(0xEA))
+    var sm = SymMap()
+    var body = List[Byte]()
+    body.reserve(64 + len(doc.top) * 24)
+    var t = 0
+    while t < len(doc.top):
+        _bin_value(doc, doc.top[t], sm, body)
+        t += 1
     _write_lst(sm, options, cat, buf)
     t = 0
-    while t < len(doc.top):
-        _bin_value(doc, doc.top[t], sm, buf)
+    while t < len(body):
+        buf.append(body[t])
         t += 1
     return buf^
 

@@ -96,6 +96,13 @@ struct TextParser[origin: ImmOrigin]:
     var macro_nparam: List[Int]
     var param_kind: List[Int]
     var param_default: List[Int]
+    var ident_cache0: String
+    var ident_node0: Int
+    var ident_cache1: String
+    var ident_node1: Int
+    var ident_hit: Int
+    var str_cache: String
+    var str_id: Int
 
     def __init__(out self, raw: Span[Byte, Self.origin]):
         self.raw = raw
@@ -113,6 +120,13 @@ struct TextParser[origin: ImmOrigin]:
         self.macro_nparam = List[Int]()
         self.param_kind = List[Int]()
         self.param_default = List[Int]()
+        self.ident_cache0 = String()
+        self.ident_node0 = -1
+        self.ident_cache1 = String()
+        self.ident_node1 = -1
+        self.ident_hit = -1
+        self.str_cache = String()
+        self.str_id = -1
 
     def _b(self) -> Int:
         return Int(self.raw[self.i])
@@ -201,6 +215,8 @@ struct TextParser[origin: ImmOrigin]:
                 if iv == 10:
                     return doc.add_symbol_text("$ion_1_0")
                 return doc.add_symbol_text("$ion_1_1")
+        if not self._ann_ahead():
+            return self._one(doc, tab, cat)
         var anns = List[Int]()
         while self._ann_ahead():
             var quoted = self._b() == 39
@@ -212,9 +228,7 @@ struct TextParser[origin: ImmOrigin]:
             self.skip_ws()
         var id = self._one(doc, tab, cat)
         if id < 0:
-            if len(anns) != 0:
-                raise DecodeError(DecodeError.KIND_SYNTAX, self.i)
-            return -1
+            raise DecodeError(DecodeError.KIND_SYNTAX, self.i)
         doc.set_anns(id, anns^)
         return id
 
@@ -332,12 +346,9 @@ struct TextParser[origin: ImmOrigin]:
         raise DecodeError(DecodeError.KIND_SYNTAX, self.i)
 
     def _copy(self, a: Int, b: Int) -> String:
-        var buf = List[Byte]()
-        var k = a
-        while k < b:
-            buf.append(self.raw[k])
-            k += 1
-        return String(unsafe_from_utf8=buf)
+        if a >= b:
+            return String()
+        return String(unsafe_from_utf8=self.raw[a:b])
 
     def _list(mut self, mut doc: IonDoc, mut tab: LocalTab, cat: Catalog) raises DecodeError -> Int:
         self._enter()
@@ -397,14 +408,20 @@ struct TextParser[origin: ImmOrigin]:
             return id
         while True:
             var field = self._field_name(doc, tab)
-            self.skip_ws()
-            self._expect(58)
             if self.i < self.n and self._b() == 58:
-                raise DecodeError(DecodeError.KIND_SYNTAX, self.i)
+                self.i += 1
+                if self.i < self.n and self._b() == 58:
+                    raise DecodeError(DecodeError.KIND_SYNTAX, self.i)
+            else:
+                self.skip_ws()
+                self._expect(58)
+                if self.i < self.n and self._b() == 58:
+                    raise DecodeError(DecodeError.KIND_SYNTAX, self.i)
             var child = self.parse_value(doc, tab, cat)
             if child >= 0:
                 doc.add_child(id, child, field)
-            self.skip_ws()
+            if self.i >= self.n or (self._b() != 44 and self._b() != 125):
+                self.skip_ws()
             if self.i < self.n and self._b() == 44:
                 self.i += 1
                 self.skip_ws()
@@ -449,7 +466,11 @@ struct TextParser[origin: ImmOrigin]:
             var text = self._quoted(39, False)
             var node = doc.add_symbol_text(String(unsafe_from_utf8=text))
             return doc.nodes[node].a
-        var text = self._ident_text()
+        self._take_ident()
+        var fast = self._fast_symbol_node(doc)
+        if fast >= 0:
+            return doc.nodes[fast].a
+        var text = self._hit_text()
         var text_bytes = text.as_bytes()
         if len(text_bytes) > 1 and Int(text_bytes[0]) == 36:
             var all_digit = True
@@ -475,14 +496,106 @@ struct TextParser[origin: ImmOrigin]:
         var node = doc.add_symbol_text(text)
         return doc.nodes[node].a
 
-    def _ident_text(mut self) raises DecodeError -> String:
+    def _take_ident(mut self) raises DecodeError:
         if self.i >= self.n or not _ident(self._b()) or (self._b() >= 48 and self._b() <= 57):
             raise DecodeError(DecodeError.KIND_SYNTAX, self.i)
         var start = self.i
         self.i += 1
         while self.i < self.n and _ident(self._b()):
             self.i += 1
-        return self._copy(start, self.i)
+        var n = self.i - start
+        if self._same_ident(self.ident_cache0, start, n):
+            self.ident_hit = 0
+            return
+        if self._same_ident(self.ident_cache1, start, n):
+            self.ident_hit = 1
+            return
+        self.ident_cache1 = self.ident_cache0
+        self.ident_node1 = self.ident_node0
+        self.ident_cache0 = self._copy(start, self.i)
+        self.ident_node0 = -1
+        self.ident_hit = 0
+
+    def _ident_text(mut self) raises DecodeError -> String:
+        self._take_ident()
+        return self._hit_text()
+
+    def _hit_text(self) -> String:
+        if self.ident_hit == 0:
+            return self.ident_cache0
+        return self.ident_cache1
+
+    def _cached_sym_node(self) -> Int:
+        if self.ident_hit == 0:
+            return self.ident_node0
+        if self.ident_hit == 1:
+            return self.ident_node1
+        return -1
+
+    def _remember_node(mut self, node: Int):
+        if self.ident_hit == 0:
+            self.ident_node0 = node
+        elif self.ident_hit == 1:
+            self.ident_node1 = node
+
+    def _cache_lead(self) -> Int:
+        if self.ident_hit == 0:
+            var raw = self.ident_cache0.as_bytes()
+            if len(raw) == 0:
+                return 0
+            return Int(raw[0])
+        var raw = self.ident_cache1.as_bytes()
+        if len(raw) == 0:
+            return 0
+        return Int(raw[0])
+
+    def _is_keyword_text(self, text: String) -> Bool:
+        var raw = text.as_bytes()
+        var n = len(raw)
+        if n == 3:
+            return Int(raw[0]) == 110 and Int(raw[1]) == 97 and Int(raw[2]) == 110
+        if n == 4:
+            if Int(raw[0]) == 110 and Int(raw[1]) == 117 and Int(raw[2]) == 108 and Int(raw[3]) == 108:
+                return True
+            return Int(raw[0]) == 116 and Int(raw[1]) == 114 and Int(raw[2]) == 117 and Int(raw[3]) == 101
+        if n == 5:
+            return (
+                Int(raw[0]) == 102
+                and Int(raw[1]) == 97
+                and Int(raw[2]) == 108
+                and Int(raw[3]) == 115
+                and Int(raw[4]) == 101
+            )
+        return False
+
+    def _cached_is_keyword(self) -> Bool:
+        if self.ident_hit == 0:
+            return self._is_keyword_text(self.ident_cache0)
+        if self.ident_hit == 1:
+            return self._is_keyword_text(self.ident_cache1)
+        return False
+
+    def _fast_symbol_node(mut self, mut doc: IonDoc) -> Int:
+        """Symbol node for the ident just scanned. `-1` when it is a keyword or a `$` symbol."""
+        if self._cached_is_keyword() or self._cache_lead() == 36:
+            return -1
+        var node = self._cached_sym_node()
+        if node >= 0:
+            return node
+        node = doc.add_symbol_text(self._hit_text())
+        self._remember_node(node)
+        return node
+
+    def _same_ident(self, cached: String, start: Int, n: Int) -> Bool:
+        var raw = cached.as_bytes()
+        if len(raw) != n:
+            return False
+        var k = 0
+        while k < n:
+            if Int(raw[k]) != self._at(start + k):
+                return False
+            k += 1
+        return True
 
     def _operator(mut self) raises DecodeError -> String:
         var buf = List[Byte]()
@@ -498,7 +611,11 @@ struct TextParser[origin: ImmOrigin]:
         return String(unsafe_from_utf8=buf)
 
     def _keyword_or_symbol(mut self, mut doc: IonDoc, mut tab: LocalTab) raises DecodeError -> Int:
-        var text = self._ident_text()
+        self._take_ident()
+        var fast = self._fast_symbol_node(doc)
+        if fast >= 0:
+            return fast
+        var text = self._hit_text()
         if text == "null":
             return self._null(doc)
         if text == "true":
@@ -560,6 +677,32 @@ struct TextParser[origin: ImmOrigin]:
         raise DecodeError(DecodeError.KIND_SYNTAX, self.i)
 
     def _string(mut self, mut doc: IonDoc, long: Bool) raises DecodeError -> Int:
+        if not long:
+            var plain = self._plain_quote(34)
+            if plain >= 0:
+                var start = self.i + 1
+                var n = plain - start
+                var cached = self.str_cache.as_bytes()
+                if len(cached) == n:
+                    var same = True
+                    var k = 0
+                    while k < n:
+                        if Int(cached[k]) != self._at(start + k):
+                            same = False
+                            break
+                        k += 1
+                    if same:
+                        self.i = plain + 1
+                        if self.str_id >= 0:
+                            return doc.add_string_at(self.str_id)
+                        var hit = doc.add_string(self.str_cache)
+                        self.str_id = doc.nodes[hit].a
+                        return hit
+                self.str_cache = String(unsafe_from_utf8=self.raw[start:plain])
+                self.i = plain + 1
+                var made = doc.add_string(self.str_cache)
+                self.str_id = doc.nodes[made].a
+                return made
         var buf = List[Byte]()
         if long:
             self._read_long(buf, False)
@@ -574,6 +717,20 @@ struct TextParser[origin: ImmOrigin]:
         else:
             self._read_short(buf, 34, False)
         return doc.add_string(String(unsafe_from_utf8=buf))
+
+    def _plain_quote(self, end: Int) -> Int:
+        """Index of the closing quote when the literal has no escapes. -1 otherwise."""
+        if self.i >= self.n or self._b() != end:
+            return -1
+        var j = self.i + 1
+        while j < self.n:
+            var c = self._at(j)
+            if c == end:
+                return j
+            if c == 92 or c < 32:
+                return -1
+            j += 1
+        return -1
 
     def _quoted(mut self, end: Int, long: Bool) raises DecodeError -> List[Byte]:
         var buf = List[Byte]()
@@ -785,7 +942,48 @@ struct TextParser[origin: ImmOrigin]:
             var n = self._at(self.i + 1)
             if n == 120 or n == 88 or n == 98 or n == 66:
                 return self._radix(doc, neg, n == 98 or n == 66)
+        var fast = self._fast_i64(doc, neg)
+        if fast >= 0:
+            return fast
         return self._real(doc, neg)
+
+    def _fast_i64(mut self, mut doc: IonDoc, neg: Bool) raises DecodeError -> Int:
+        """Parse a decimal integer that fits in Int64. Returns -1 when the token is not that simple."""
+        if self.i >= self.n:
+            return -1
+        var c0 = self._b()
+        if c0 < 48 or c0 > 57:
+            return -1
+        if c0 == 48:
+            var nxt = self.i + 1
+            if nxt < self.n:
+                var n = self._at(nxt)
+                if not _stop(n) and not _ws(n):
+                    return -1
+            self.i = nxt
+            return doc.add_i64(Int64(0))
+        var acc = Int64(0)
+        var j = self.i
+        var digits = 0
+        while j < self.n:
+            var c = self._at(j)
+            if c < 48 or c > 57:
+                break
+            if acc > Int64(922337203685477580):
+                return -1
+            acc = acc * Int64(10) + Int64(c - 48)
+            digits += 1
+            j += 1
+        if digits == 0:
+            return -1
+        if j < self.n:
+            var n = self._at(j)
+            if not _stop(n) and not _ws(n):
+                return -1
+        self.i = j
+        if neg:
+            return doc.add_i64(Int64(0) - acc)
+        return doc.add_i64(acc)
 
     def _word_at(mut self, word: String) -> Bool:
         var b = word.as_bytes()
@@ -1518,11 +1716,9 @@ def _utf8_from_wide[origin: ImmOrigin](raw: Span[Byte, origin]) raises DecodeErr
             b += 1
         i += width
         if width == 2 and cp >= 0xD800 and cp <= 0xDBFF and i + 1 < len(raw):
-            var low = 0
+            var low = (Int(raw[i + 1]) << 8) | Int(raw[i])
             if be:
                 low = (Int(raw[i]) << 8) | Int(raw[i + 1])
-            else:
-                low = (Int(raw[i + 1]) << 8) | Int(raw[i])
             if low >= 0xDC00 and low <= 0xDFFF:
                 cp = 0x10000 + ((cp - 0xD800) << 10) + (low - 0xDC00)
                 i += 2
@@ -1530,14 +1726,46 @@ def _utf8_from_wide[origin: ImmOrigin](raw: Span[Byte, origin]) raises DecodeErr
     return out^
 
 
+def _is_wide[origin: ImmOrigin](raw: Span[Byte, origin]) -> Bool:
+    if len(raw) >= 4 and Int(raw[0]) == 0 and Int(raw[1]) == 0 and Int(raw[2]) == 0:
+        return True
+    if len(raw) >= 4 and Int(raw[0]) != 0 and Int(raw[1]) == 0 and Int(raw[2]) == 0 and Int(raw[3]) == 0:
+        return True
+    if len(raw) >= 2 and Int(raw[0]) == 0 and Int(raw[1]) != 0:
+        return True
+    if len(raw) >= 2 and Int(raw[0]) != 0 and Int(raw[1]) == 0:
+        return True
+    return False
+
+
+def _ascii[origin: ImmOrigin](raw: Span[Byte, origin]) -> Bool:
+    var i = 0
+    var n = len(raw)
+    var bits = 0
+    while i + 4 <= n:
+        bits = bits | Int(raw[i]) | Int(raw[i + 1]) | Int(raw[i + 2]) | Int(raw[i + 3])
+        i += 4
+    while i < n:
+        bits = bits | Int(raw[i])
+        i += 1
+    return (bits & 128) == 0
+
+
 def decode_text[origin: ImmOrigin](raw: Span[Byte, origin], cat: Catalog) raises DecodeError -> IonDoc:
     if len(raw) >= 3 and Int(raw[0]) == 0xEF and Int(raw[1]) == 0xBB and Int(raw[2]) == 0xBF:
         raise DecodeError(DecodeError.KIND_SYNTAX, 0)
-    var utf = _utf8_from_wide(raw)
-    validate_utf8(Span(utf), 0)
     var doc = IonDoc()
+    doc.reserve(len(raw) // 2 + 8)
     var tab = LocalTab()
-    var parser = TextParser(Span(utf))
+    if _is_wide(raw):
+        var utf = _utf8_from_wide(raw)
+        validate_utf8(Span(utf), 0)
+        var parser = TextParser(Span(utf))
+        parser.read_all(doc, tab, cat)
+        return doc^
+    if not _ascii(raw):
+        validate_utf8(raw, 0)
+    var parser = TextParser(raw)
     parser.read_all(doc, tab, cat)
     return doc^
 

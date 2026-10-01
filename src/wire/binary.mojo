@@ -23,9 +23,8 @@ from runtime.doc import (
     PREC_YEAR,
 )
 from runtime.error import DecodeError
-from runtime.intx import BigInt, big_from_be
+from runtime.intx import BigInt, big_from_be, big_from_u64
 from runtime.symtab import Catalog, LocalTab
-from runtime.utf8 import string_from_span
 from wire.ion11 import Ion11
 from wire.lst import apply_lst, is_local_table, sym_from_sid
 from wire.time import apply_offset
@@ -36,12 +35,24 @@ struct BinParser[origin: ImmOrigin]:
     var i: Int
     var n: Int
     var depth: Int
+    var cache_sid0: Int
+    var cache_sym0: Int
+    var cache_sid1: Int
+    var cache_sym1: Int
 
     def __init__(out self, raw: Span[Byte, Self.origin]):
         self.raw = raw
         self.i = 0
         self.n = len(raw)
         self.depth = 0
+        self.cache_sid0 = -1
+        self.cache_sym0 = -1
+        self.cache_sid1 = -1
+        self.cache_sym1 = -1
+
+    def _clear_sid_cache(mut self):
+        self.cache_sid0 = -1
+        self.cache_sid1 = -1
 
     def _b(mut self) raises DecodeError -> Int:
         if self.i >= self.n:
@@ -51,8 +62,11 @@ struct BinParser[origin: ImmOrigin]:
         return c
 
     def _var_uint(mut self) raises DecodeError -> Int:
-        var acc = 0
-        var k = 0
+        var b0 = self._b()
+        if (b0 & 0x80) != 0:
+            return b0 & 0x7F
+        var acc = b0 & 0x7F
+        var k = 1
         while k < 10:
             var b = self._b()
             var piece = b & 0x7F
@@ -101,27 +115,49 @@ struct BinParser[origin: ImmOrigin]:
         if self.n == 0:
             return
         var ver = self._bvm()
-        var r11 = Ion11(self.raw)
+        while self.i < self.n:
+            if ver == 11:
+                ver = self._read11(doc, tab, cat)
+            else:
+                ver = self._read10(doc, tab, cat)
+
+    def _read10(mut self, mut doc: IonDoc, mut tab: LocalTab, cat: Catalog) raises DecodeError -> Int:
         while self.i < self.n:
             if self._at_bvm():
-                ver = self._bvm()
+                var next = self._bvm()
                 tab.reset_system()
-                r11._clear_macros()
-                continue
-            if ver == 11:
-                r11.i = self.i
-                var id11 = r11.value(doc, tab, False, cat)
-                self.i = r11.i
-                if id11 >= 0 and not is_local_table(doc, id11):
-                    doc.add_top(id11)
-                continue
-            var id = self._value(doc, tab, ver, False)
+                self._clear_sid_cache()
+                return next
+            var id = self._value(doc, tab, 10, False)
             if id < 0:
                 continue
-            if ver == 10 and is_local_table(doc, id):
+            if is_local_table(doc, id):
                 apply_lst(doc, id, tab, cat, self.i)
+                self._clear_sid_cache()
                 continue
             doc.add_top(id)
+        return 10
+
+    def _read11(mut self, mut doc: IonDoc, mut tab: LocalTab, cat: Catalog) raises DecodeError -> Int:
+        var r11 = Ion11(self.raw)
+        r11.i = self.i
+        while r11.i < self.n:
+            self.i = r11.i
+            if self._at_bvm():
+                var next = self._bvm()
+                tab.reset_system()
+                self._clear_sid_cache()
+                r11._clear_macros()
+                if next != 11:
+                    return next
+                r11.i = self.i
+                continue
+            var id11 = r11.value(doc, tab, False, cat)
+            self.i = r11.i
+            if id11 >= 0 and not is_local_table(doc, id11):
+                doc.add_top(id11)
+        self.i = r11.i
+        return 11
 
     def _at_bvm(self) -> Bool:
         if self.i + 3 >= self.n:
@@ -148,6 +184,23 @@ struct BinParser[origin: ImmOrigin]:
     def _value(mut self, mut doc: IonDoc, mut tab: LocalTab, ver: Int, in_ann: Bool) raises DecodeError -> Int:
         if self.depth > 1024:
             raise DecodeError(DecodeError.KIND_DEPTH, self.i)
+        if self.i < self.n:
+            var td0 = Int(self.raw[self.i])
+            var t0 = td0 >> 4
+            var ln0 = td0 & 15
+            if t0 == 2 and ln0 == 0:
+                self.i += 1
+                return doc.add_i64(Int64(0))
+            if t0 == 2 and ln0 == 1 and self.i + 1 < self.n:
+                var one = Int(self.raw[self.i + 1])
+                self.i += 2
+                return doc.add_i64(Int64(one))
+            if t0 == 8 and ln0 < 14:
+                self.i += 1
+                return doc.add_string_raw(self._take(ln0), self.i)
+            if t0 >= 11 and t0 <= 13:
+                self.i += 1
+                return self._container(doc, tab, ver, t0, ln0)
         var td = self._b()
         var t = td >> 4
         var ln = td & 0x0F
@@ -177,6 +230,37 @@ struct BinParser[origin: ImmOrigin]:
             if t == 3 and ln == 0:
                 raise DecodeError(DecodeError.KIND_SYNTAX, self.i)
             var size = self._repr_len(ln)
+            if size == 0:
+                return doc.add_i64(Int64(0))
+            if size == 1:
+                if self.i >= self.n:
+                    raise DecodeError(DecodeError.KIND_EOF, self.i)
+                var one = Int(self.raw[self.i])
+                self.i += 1
+                if t == 3 and one == 0:
+                    raise DecodeError(DecodeError.KIND_SYNTAX, self.i)
+                if t == 3:
+                    return doc.add_i64(Int64(0) - Int64(one))
+                return doc.add_i64(Int64(one))
+            if size <= 8:
+                if self.i + size > self.n:
+                    raise DecodeError(DecodeError.KIND_EOF, self.i)
+                var mag = UInt64(0)
+                var k = 0
+                while k < size:
+                    mag = (mag << UInt64(8)) | UInt64(Int(self.raw[self.i + k]))
+                    k += 1
+                self.i += size
+                if t == 3 and mag == UInt64(0):
+                    raise DecodeError(DecodeError.KIND_SYNTAX, self.i)
+                if mag <= UInt64(9223372036854775807):
+                    if t == 3:
+                        return doc.add_i64(Int64(0) - Int64(mag))
+                    return doc.add_i64(Int64(mag))
+                if t == 3 and mag == (UInt64(1) << UInt64(63)):
+                    return doc.add_i64(Int64(0) - Int64(1) - Int64(9223372036854775807))
+                var big = big_from_u64(mag, t == 3)
+                return doc.add_int(big^)
             var mag = big_from_be(self._take(size), False, self.i)
             if t == 3:
                 if mag.is_zero():
@@ -227,7 +311,7 @@ struct BinParser[origin: ImmOrigin]:
             var size = self._repr_len(ln)
             var span = self._take(size)
             if t == 8:
-                return doc.add_string(string_from_span(span, self.i))
+                return doc.add_string_raw(span, self.i)
             var buf = List[Byte]()
             var k = 0
             while k < len(span):
@@ -392,12 +476,27 @@ struct BinParser[origin: ImmOrigin]:
         var id = doc.start_container(kind)
         while self.i < end:
             if t == 13:
-                var sid = self._var_uint()
+                var b = Int(self.raw[self.i])
+                var sid = b & 0x7F
+                if (b & 0x80) != 0:
+                    self.i += 1
+                else:
+                    sid = self._var_uint()
                 var child = self._value(doc, tab, ver, False)
                 if child < 0:
                     continue
-                var sym = sym_from_sid(doc, tab, sid, self.i)
-                doc.add_child(id, child, doc.nodes[sym].a)
+                var slot = self.cache_sym0
+                if sid != self.cache_sid0:
+                    if sid == self.cache_sid1:
+                        slot = self.cache_sym1
+                    else:
+                        var sym = sym_from_sid(doc, tab, sid, self.i)
+                        slot = doc.nodes[sym].a
+                        self.cache_sid1 = self.cache_sid0
+                        self.cache_sym1 = self.cache_sym0
+                        self.cache_sid0 = sid
+                        self.cache_sym0 = slot
+                doc.add_child(id, child, slot)
             else:
                 var child = self._value(doc, tab, ver, False)
                 if child < 0:
@@ -460,6 +559,7 @@ def _dim_bin(year: Int, month: Int) -> Int:
 
 def decode_binary[origin: ImmOrigin](raw: Span[Byte, origin], cat: Catalog) raises DecodeError -> IonDoc:
     var doc = IonDoc()
+    doc.reserve(len(raw))
     var tab = LocalTab()
     var parser = BinParser(raw)
     parser.read_all(doc, tab, cat)

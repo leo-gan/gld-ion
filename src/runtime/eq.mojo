@@ -191,10 +191,14 @@ def ion_eq(a: IonDoc, ai: Int, b: IonDoc, bi: Int) -> Bool:
     if ak == K_LIST or ak == K_SEXP:
         if a.nodes[ai].nchild != b.nodes[bi].nchild:
             return False
+        var ea = a.nodes[ai].child
+        var eb = b.nodes[bi].child
         var i = 0
         while i < a.nodes[ai].nchild:
-            if not ion_eq(a, a.child_at(ai, i), b, b.child_at(bi, i)):
+            if not ion_eq(a, a.edges[ea].child, b, b.edges[eb].child):
                 return False
+            ea = a.edges[ea].next
+            eb = b.edges[eb].next
             i += 1
         return True
     if ak == K_STRUCT:
@@ -206,8 +210,26 @@ def _struct_eq(a: IonDoc, ai: Int, b: IonDoc, bi: Int) -> Bool:
     if a.nodes[ai].nchild != b.nodes[bi].nchild:
         return False
     var n = a.nodes[ai].nchild
-    var used = List[Bool]()
+    var a_child = List[Int]()
+    var a_field = List[Int]()
+    var b_child = List[Int]()
+    var b_field = List[Int]()
+    var e = a.nodes[ai].child
     var i = 0
+    while i < n:
+        a_child.append(a.edges[e].child)
+        a_field.append(a.edges[e].field)
+        e = a.edges[e].next
+        i += 1
+    e = b.nodes[bi].child
+    i = 0
+    while i < n:
+        b_child.append(b.edges[e].child)
+        b_field.append(b.edges[e].field)
+        e = b.edges[e].next
+        i += 1
+    var used = List[Bool]()
+    i = 0
     while i < n:
         used.append(False)
         i += 1
@@ -216,8 +238,8 @@ def _struct_eq(a: IonDoc, ai: Int, b: IonDoc, bi: Int) -> Bool:
         var found = False
         var j = 0
         while j < n:
-            if not used[j] and sym_eq(a, a.field_at(ai, i), b, b.field_at(bi, j)):
-                if ion_eq(a, a.child_at(ai, i), b, b.child_at(bi, j)):
+            if not used[j] and sym_eq(a, a_field[i], b, b_field[j]):
+                if ion_eq(a, a_child[i], b, b_child[j]):
                     used[j] = True
                     found = True
                     break

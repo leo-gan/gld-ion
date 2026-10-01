@@ -33,13 +33,6 @@ def sym_from_sid(mut doc: IonDoc, tab: LocalTab, sid: Int, offset: Int) raises D
     return doc.add_symbol_ref(SymRef(-1, sid, imp, got.imp_sid))
 
 
-def _ann0(doc: IonDoc, id: Int) -> String:
-    var n = doc.nodes[id]
-    if n.ann_n == 0:
-        return String()
-    return doc.sym_text(doc.anns[n.ann])
-
-
 def _count_field(doc: IonDoc, id: Int, name: String) -> Int:
     var n = 0
     var i = 0
@@ -85,12 +78,17 @@ def _i64(doc: IonDoc, id: Int, offset: Int) raises DecodeError -> Int:
 
 
 def is_local_table(doc: IonDoc, id: Int) -> Bool:
-    if _ann0(doc, id) != "$ion_symbol_table":
+    var n = doc.nodes[id]
+    if n.ann_n == 0:
         return False
-    var k = doc.nodes[id].kind
-    if k == K_STRUCT:
+    var s = doc.syms[doc.anns[n.ann]]
+    if s.text < 0:
+        return False
+    if doc.texts[s.text] != "$ion_symbol_table":
+        return False
+    if n.kind == K_STRUCT:
         return True
-    return k == K_NULL and doc.nodes[id].a == K_STRUCT
+    return n.kind == K_NULL and n.a == K_STRUCT
 
 
 def _sym_text_of(doc: IonDoc, id: Int) -> String:
