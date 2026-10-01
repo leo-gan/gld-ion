@@ -428,6 +428,19 @@ struct Ion11[origin: ImmOrigin]:
                 doc.add_child(id, child, -1)
         return id
 
+    def _field_id(mut self, mut doc: IonDoc, mut tab: LocalTab, mode: Bool, cat: Catalog) raises DecodeError -> Int:
+        if mode:
+            var iv = flex_int(self.raw, self.i)
+            if iv >= 0:
+                var sym = sym_from_sid(doc, tab, iv, self.i)
+                return doc.nodes[sym].a
+            var nbytes = -1 - iv
+            return doc.nodes[doc.add_symbol_text(self._text(nbytes))].a
+        var sid = flex_uint(self.raw, self.i)
+        var sym = sym_from_sid(doc, tab, sid, self.i)
+        _ = cat
+        return doc.nodes[sym].a
+
     def _struct(mut self, mut doc: IonDoc, mut tab: LocalTab, n: Int, delim: Bool, flex: Bool, cat: Catalog) raises DecodeError -> Int:
         var id = doc.start_container(K_STRUCT)
         var end = len(self.raw)
@@ -438,19 +451,7 @@ struct Ion11[origin: ImmOrigin]:
             if delim and Int(self.raw[self.i]) == 0xEF:
                 self.i += 1
                 return id
-            var field = -1
-            if mode:
-                var iv = flex_int(self.raw, self.i)
-                if iv >= 0:
-                    var sym = sym_from_sid(doc, tab, iv, self.i)
-                    field = doc.nodes[sym].a
-                else:
-                    var nbytes = -1 - iv
-                    field = doc.nodes[doc.add_symbol_text(self._text(nbytes))].a
-            else:
-                var sid = flex_uint(self.raw, self.i)
-                var sym = sym_from_sid(doc, tab, sid, self.i)
-                field = doc.nodes[sym].a
+            var field = self._field_id(doc, tab, mode, cat)
             if self.i < len(self.raw) and (Int(self.raw[self.i]) == 0xEE or Int(self.raw[self.i]) == 0xEC or Int(self.raw[self.i]) == 0xEF):
                 var marker = Int(self.raw[self.i])
                 self.i += 1
@@ -566,23 +567,22 @@ struct Ion11[origin: ImmOrigin]:
             t += 1
 
     def _short_time(mut self, mut doc: IonDoc, op: Int) raises DecodeError -> Int:
-        var n = 0
-        if op == 0x80:
-            n = 1
-        elif op == 0x81 or op == 0x82:
-            n = 2
-        elif op == 0x83:
-            n = 4
-        elif op == 0x84 or op == 0x88 or op == 0x89:
-            n = 5
-        elif op == 0x85:
-            n = 6
-        elif op == 0x86 or op == 0x8A:
-            n = 7
-        elif op == 0x87 or op == 0x8B:
-            n = 8
-        else:
-            n = 9
+        var n = 1
+        if op != 0x80:
+            if op == 0x81 or op == 0x82:
+                n = 2
+            elif op == 0x83:
+                n = 4
+            elif op == 0x84 or op == 0x88 or op == 0x89:
+                n = 5
+            elif op == 0x85:
+                n = 6
+            elif op == 0x86 or op == 0x8A:
+                n = 7
+            elif op == 0x87 or op == 0x8B:
+                n = 8
+            else:
+                n = 9
         var start = self._take_bits(n)
         var when = IonTime()
         when.year = 1970 + self._field(start, 0, 7)
@@ -667,7 +667,6 @@ struct Ion11[origin: ImmOrigin]:
                 when.prec = PREC_DAY
             return self._finish_time(doc, when)
         when.day = self._field(start, 18, 5)
-        when.prec = PREC_DAY
         when.hour = self._field(start, 23, 5)
         when.minute = self._field(start, 28, 6)
         when.prec = PREC_MIN

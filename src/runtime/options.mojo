@@ -24,5 +24,5 @@ struct EncodeOptions:
         self.import_versions = List[Int]()
 
     def add_import(mut self, name: String, version: Int):
-        self.import_names.append(name^)
+        self.import_names.append(name)
         self.import_versions.append(version)

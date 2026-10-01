@@ -296,10 +296,11 @@ def _decimal(doc: IonDoc, at: Int, n: Int, neg: Bool, exp: Int, mut buf: List[By
 def _container(doc: IonDoc, id: Int, mut buf: List[Byte]) raises DecodeError:
     var n = doc.nodes[id]
     var body = List[Byte]()
+    var edge = n.child
     var i = 0
     while i < n.nchild:
         if n.kind == K_STRUCT:
-            var field = doc.field_at(id, i)
+            var field = doc.edges[edge].field
             var text = String("")
             if field >= 0 and doc.syms[field].text >= 0:
                 text = doc.texts[doc.syms[field].text]
@@ -309,7 +310,8 @@ def _container(doc: IonDoc, id: Int, mut buf: List[Byte]) raises DecodeError:
             while k < len(nb):
                 body.append(nb[k])
                 k += 1
-        _value(doc, doc.child_at(id, i), body)
+        _value(doc, doc.edges[edge].child, body)
+        edge = doc.edges[edge].next
         i += 1
     if n.kind == K_STRUCT and len(body) == 0:
         buf.append(Byte(0xD0))
