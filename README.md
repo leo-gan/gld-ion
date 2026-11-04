@@ -1,5 +1,7 @@
 # mojo-ion
 
+[Serialization](https://leo-gan.github.io/serialization/) is the hub for the theory, the history, and the benchmarks.
+
 A from-scratch Amazon Ion implementation for [Mojo](https://www.modular.com/mojo).
 The runtime and the code generator are written in Mojo. They do not wrap, link,
 or vendor ion-c, ion-java, ion-rust, or any other C, C++, or Rust Ion library.
