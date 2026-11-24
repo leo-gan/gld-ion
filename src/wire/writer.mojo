@@ -879,12 +879,17 @@ def _emit_core(doc: IonDoc, id: Int, mut sm: SymMap, mut buf: List[Byte]) raises
         else:
             var bits = doc.floats[n.b]
             var width = n.a
-            var tmp = List[Byte]()
+            # Length is the byte width. Writing it straight in avoids a
+            # temporary list on every float (the telemetry hot path).
+            if width < 14:
+                buf.append(Byte((4 << 4) | width))
+            else:
+                buf.append(Byte((4 << 4) | 14))
+                _varuint(buf, width)
             var s = width - 1
             while s >= 0:
-                tmp.append(Byte(Int((bits >> UInt64(s * 8)) & UInt64(255))))
+                buf.append(Byte(Int((bits >> UInt64(s * 8)) & UInt64(255))))
                 s -= 1
-            _td(buf, 4, tmp)
     elif k == K_DECIMAL:
         var tmp = List[Byte]()
         _varint(tmp, n.d, False)
@@ -932,6 +937,9 @@ def _emit_core(doc: IonDoc, id: Int, mut sm: SymMap, mut buf: List[Byte]) raises
             sid = sm.sid(doc.texts[s.text])
         if sid == 0:
             buf.append(Byte(0x70))
+        elif sid < 256:
+            buf.append(Byte(0x71))
+            buf.append(Byte(sid))
         else:
             var raw = BigInt()
             var tmp = List[Byte]()
