@@ -47,6 +47,32 @@ fn main() raises:
 through `add_int` and a `BigInt`. `add_decimal` keeps the coefficient and the
 exponent, including a negative zero. `add_time` keeps precision and offset.
 
+## Binary cursor
+
+`IonBin` writes one Ion 1.0 value without building an `IonDoc`. Intern every
+field name, call `begin`, then write the live values. `IonCur` reads that
+value back, including the local symbol table. The bytes are ordinary Ion 1.0,
+so `decode` accepts them too.
+
+```mojo
+from wire.direct import IonBin, IonCur
+
+fn main() raises:
+    var bin = IonBin()
+    var name = bin.intern_lit("n")
+    bin.begin()
+    var st = bin.open_container()
+    bin.field(name)
+    bin.write_i64(150)
+    bin.close_container(st, 13)
+    var raw = bin^.take()
+    var cur = IonCur(Span(raw))
+    cur.open()
+    _ = cur.enter_struct()
+    _ = cur.field_sid()
+    print(cur.read_i64())
+```
+
 ## Generated struct
 
 `testdata/schema/message.json` describes a closed object. After `pixi run
